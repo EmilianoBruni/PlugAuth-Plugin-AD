@@ -1,0 +1,6 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/PlugAuth-Plugin-AD.t
+lib/PlugAuth/Plugin/AD.pm
