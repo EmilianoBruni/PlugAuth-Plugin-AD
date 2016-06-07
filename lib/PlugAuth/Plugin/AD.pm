@@ -1,6 +1,6 @@
 package PlugAuth::Plugin::AD;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use strict;
 use warnings;
@@ -8,17 +8,31 @@ use v5.10;
 use Net::LDAP;
 use Log::Log4perl qw/:easy/;
 use Role::Tiny::With;
+use PlugAuth::Plugin::FlatAuthz;
 
 with 'PlugAuth::Role::Plugin';
 with 'PlugAuth::Role::Auth';
 with 'PlugAuth::Role::Authz';
 with 'PlugAuth::Role::Welcome';
+with 'PlugAuth::Role::Refresh';
 
 sub init {
 	my ($s) = @_;
 	
 	# add this group to group list
 	#$s->create_group('AD',[]);
+
+	my $app = $s->app;
+	
+
+	$s->{flatauthz} = PlugAuth::Plugin::FlatAuthz->new($app->config, 
+		Clustericious::Config->new({}), $app);
+	return $s;
+}
+
+sub refresh {
+	my $s	= shift;
+	$s->{flatauthz}->refresh;
 }
 
 sub welcome {
@@ -72,17 +86,76 @@ sub check_credentials {
     return 0;
 }
 
+sub all_users {
+	my ($class, $user, $pw) = @_;
+	$user = lc $user;
+
+    my $ldap_config = $class->plugin_config;
+    if (!$ldap_config or !$ldap_config->{authoritative}) {
+        # Check files first.
+        return 1 if $class->deligate_check_credentials($user, $pw);
+    }
+    return 0 unless $ldap_config;
+    my $server = $ldap_config->server or LOGDIE "Missing ldap server";
+    my $ad = Net::LDAP->new($server, timeout => 5) or do {
+        ERROR "Could not connect to ldap server $server: $@";
+        return 0;
+    };
+
+    my $orig = $user;
+    my $extra = $user =~ tr/a-zA-Z0-9@._-//dc;
+    WARN "Invalid username '$orig', turned into $user" if $extra;
+
+
+	my $mdn 	= $ldap_config->{managerDN};
+	my $secret 	= $ldap_config->{managerPassword};
+
+	my $msg = $ad->bind($mdn,password => $secret)
+		or LOGDIE "Wrong Manager DN or password";
+	
+	my $sbase	= $ldap_config->{searchBase};
+	my $filter	= '(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))';
+	my $results = $ad->search(base=>$sbase,filter=>$filter);
+
+	my @ret;
+
+	use Data::Dumper;
+	open( my $fh, '>>/tmp/debug.txt');
+	print $fh $results->count;
+	foreach my $entry ($results->entries) { 
+		#$entry->dump($fh); 
+		print $fh $entry->get_value('sAMAccountName') . "\n";
+		push @ret, $entry->get_value('sAMAccountName') ;
+	}
+	close($fh);
+
+	my $flat = $class->next_auth;
+
+	return (@ret, $flat->all_users);
+}
+
+sub create_user {
+	# delegate to next plugin (plain??)
+	my $next_auth = shift->next_auth;
+	return 0 unless defined $next_auth;
+	$next_auth->create_user(@_);
+}
+
 sub can_user_action_resource {}
 sub match_resources {}
 sub host_has_tag {}
 sub actions {}
 sub groups_for_user {
 	my $s	= shift;
-	my $ret = ['AD'];
-	return $ret;
+	return $s->{flatauthz}->groups_for_user(@_);
+	#my $ret = ['AD'];
+	#return $ret;
 }
 sub all_groups {
-	return ('AD');
+	my $s	= shift;
+	my @ret = $s->{flatauthz}->all_groups(@_);
+	unshift @ret, 'AD';
+	return @ret;
 }
 sub users_in_group {}
 
