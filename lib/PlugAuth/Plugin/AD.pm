@@ -198,9 +198,6 @@ sub routed_to_flatauthz {
 	my $s		= shift;
 	my @ref		= caller(1);
 	my ($sub) 	= $ref[3]  =~ /([\w_]+)$/;
-	open(my $fh, '>>/tmp/debug.txt');
-	print $fh $sub . "\n";
-	close($fh);
 	return $s->{flatauthz}->$sub(@_);
 }
 
