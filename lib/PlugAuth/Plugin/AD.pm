@@ -16,15 +16,11 @@ with 'PlugAuth::Role::Authz';
 with 'PlugAuth::Role::Welcome';
 with 'PlugAuth::Role::Refresh';
 
+use vars qw/$AUTOLOAD/;
+
 sub init {
 	my ($s) = @_;
-	
-	# add this group to group list
-	#$s->create_group('AD',[]);
-
 	my $app = $s->app;
-	
-
 	$s->{flatauthz} = PlugAuth::Plugin::FlatAuthz->new($app->config, 
 		Clustericious::Config->new({}), $app);
 	return $s;
@@ -37,7 +33,7 @@ sub refresh {
 
 sub welcome {
 	my ($s,$c)	= @_;
-	$c->render_message('welcome to plug auth + ' . __PACKAGE__);
+	$c->render_message('welcome to plug auth + ' . __PACKAGE__ . " ($VERSION)");
 }
 
 
@@ -86,26 +82,16 @@ sub check_credentials {
     return 0;
 }
 
-sub all_users {
-	my ($class, $user, $pw) = @_;
-	$user = lc $user;
+sub ad_users {
+	my ($class) = @_;
 
     my $ldap_config = $class->plugin_config;
-    if (!$ldap_config or !$ldap_config->{authoritative}) {
-        # Check files first.
-        return 1 if $class->deligate_check_credentials($user, $pw);
-    }
     return 0 unless $ldap_config;
     my $server = $ldap_config->server or LOGDIE "Missing ldap server";
     my $ad = Net::LDAP->new($server, timeout => 5) or do {
         ERROR "Could not connect to ldap server $server: $@";
         return 0;
     };
-
-    my $orig = $user;
-    my $extra = $user =~ tr/a-zA-Z0-9@._-//dc;
-    WARN "Invalid username '$orig', turned into $user" if $extra;
-
 
 	my $mdn 	= $ldap_config->{managerDN};
 	my $secret 	= $ldap_config->{managerPassword};
@@ -119,17 +105,18 @@ sub all_users {
 
 	my @ret;
 
-	use Data::Dumper;
-	open( my $fh, '>>/tmp/debug.txt');
-	print $fh $results->count;
 	foreach my $entry ($results->entries) { 
-		#$entry->dump($fh); 
-		print $fh $entry->get_value('sAMAccountName') . "\n";
 		push @ret, $entry->get_value('sAMAccountName') ;
 	}
-	close($fh);
 
-	my $flat = $class->next_auth;
+	return @ret;
+}
+
+sub all_users {
+	my $class	= shift;
+
+	my @ret		= $class->ad_users;
+	my $flat	= $class->next_auth;
 
 	return (@ret, $flat->all_users);
 }
@@ -141,23 +128,81 @@ sub create_user {
 	$next_auth->create_user(@_);
 }
 
-sub can_user_action_resource {}
-sub match_resources {}
-sub host_has_tag {}
-sub actions {}
-sub groups_for_user {
-	my $s	= shift;
-	return $s->{flatauthz}->groups_for_user(@_);
-	#my $ret = ['AD'];
-	#return $ret;
+sub delete_user {
+	# delegate to next plugin (plain??)
+	my $next_auth = shift->next_auth;
+	return 0 unless defined $next_auth;
+	return $next_auth->delete_user(@_);
 }
+
+sub change_password {
+	# delegate to next plugin (plain??)
+	my $next_auth = shift->next_auth;
+	return 0 unless defined $next_auth;
+	return $next_auth->change_password(@_);
+}
+
+# Authz
+
+sub can_user_action_resource {
+	return shift->{flatauthz}->can_user_action_resource(@_);
+}
+
+sub match_resources {
+	return shift->{flatauthz}->match_resources(@_);
+}
+
+sub host_has_tag {
+	return shift->{flatauthz}->host_has_tag(@_);
+}
+
+sub actions {
+	return shift->{flatauthz}->actions(@_);
+}
+
+sub groups_for_user {
+	my $s		= shift;
+	my $user	= shift;
+	
+	my @ret     = $s->ad_users;
+	
+	foreach my $ad (@ret) {
+		return ['AD',$user] if ($ad eq $user);
+	}
+	return $s->{flatauthz}->groups_for_user($user);
+}
+
 sub all_groups {
 	my $s	= shift;
 	my @ret = $s->{flatauthz}->all_groups(@_);
 	unshift @ret, 'AD';
 	return @ret;
 }
-sub users_in_group {}
+
+sub users_in_group {
+	my $s		= shift;
+	my $group	= shift;
+	
+	return [$s->ad_users] if ($group eq 'AD');
+	return $s->{flatauthz}->users_in_group($group);
+}
+
+sub create_group {&routed_to_flatauthz(@_)};
+sub delete_group {&routed_to_flatauthz(@_)};
+sub grant {&routed_to_flatauthz(@_)};
+sub revoke {&routed_to_flatauthz(@_)};
+sub granted {&routed_to_flatauthz(@_)};
+sub update_group {&routed_to_flatauthz(@_)};
+
+sub routed_to_flatauthz {
+	my $s		= shift;
+	my @ref		= caller(1);
+	my ($sub) 	= $ref[3]  =~ /([\w_]+)$/;
+	open(my $fh, '>>/tmp/debug.txt');
+	print $fh $sub . "\n";
+	close($fh);
+	return $s->{flatauthz}->$sub(@_);
+}
 
 1;
 __END__
